@@ -1,0 +1,178 @@
+name: Custom.Windows.Detection.Tuoni.or.Golang
+description: |
+  Detects potential Tuoni malware by scanning for specific import hash patterns,
+  suspicious TXT resources. Also detects common Golang Build ID signatures in ALL files under 10MB across the specified directories.
+  
+  Based on indicators focusing on:
+  - Specific import hash patterns
+  - TXT resources with ID 104 and language 1033
+  - Go Build ID signatures in PE, ELF, and Mach-O binaries
+  
+author: SCY
+
+precondition:
+  SELECT * FROM info() where OS = 'windows'
+
+parameters:
+  - name: SearchFilesGlobTable
+    type: csv
+    default: |
+      Glob
+      C:/**
+
+    description: File patterns to search for. Default scans all user directories recursively.
+
+  - name: Accessor
+    default: file
+    description: The accessor to use
+    type: choices
+    choices:
+      - auto
+      - file
+      - ntfs
+      - ntfs_vss
+
+  - name: YaraRule
+    type: yara
+    default: |
+      import "pe"
+      
+      rule potential_tuoni_beacon {
+          meta:
+              description = "Detect Tuoni malware via import hash and TXT resources"
+              author = "Chong Yee"
+              date = "2025-04-25"
+              
+          condition:
+              uint16(0) == 0x5A4D and  // MZ header
+              pe.is_pe and
+              (
+                  // Check for the specific imphash
+                  pe.imphash() == "9f419b6722bed1df991fca0bfc9da70d" 
+                  
+                  or
+                  
+                  pe.imphash() == "81709ac0d56d71bf3ed766afbe2b897b" 
+                  
+                  or
+                  
+                  pe.imphash() == "4ed4165eb7258c6802feface8e840cf0" 
+                  
+                  or  
+                  
+                  pe.imphash() == "f1db89c3dc068c7b1737f97e45e983d4" 
+                  
+                  or 
+                  
+                  // Check for the TXT resource
+                  (
+                      for any resource in pe.resources : (
+                          resource.id == 104 and
+                          resource.language == 1033 and
+                          resource.type_string == "T\x00X\x00T\x00"
+                      )
+                  )
+              )
+      }
+      
+      rule potential_golang_binary {
+          meta:  
+              description = "Identifies Golang binaries (PE, ELF, Macho)"
+              author = "JAG-S @ SentinelLabs"
+              version = "1.0"
+              last_modified = "10.06.2021"
+          strings:
+              $GoBuildId = /Go build ID: \"[a-zA-Z0-9\/_-]{40,120}\"/ ascii wide
+          
+          condition:
+              (
+                  (uint16(0) == 0x5a4d) or  // PE
+                  (uint32(0) == 0x464c457f) or  // ELF
+                  (uint32(0) == 0xfeedfacf) or  // Mach-O 64-bit big endian
+                  (uint32(0) == 0xcffaedfe) or  // Mach-O 64-bit little endian
+                  (uint32(0) == 0xfeedface) or  // Mach-O 32-bit big endian
+                  (uint32(0) == 0xcefaedfe)  // Mach-O 32-bit little endian
+              )
+              and
+              #GoBuildId == 1
+      }
+    description: YARA rules to detect Tuoni malware and Go binaries
+
+  - name: Upload_File
+    default: Y
+    type: bool
+    description: Upload matching files for further analysis
+
+  - name: Calculate_Hash
+    default: Y
+    type: bool
+    description: Calculate hash values for matching files
+
+  - name: FileSize_Limit
+    default: 10485760  # 10MB in bytes
+    type: int
+    description: Maximum file size to scan in bytes (default 5MB)
+
+sources:
+  - query: |
+      LET file_search = SELECT * FROM foreach(
+          row={
+            SELECT Glob FROM SearchFilesGlobTable
+          },
+          query={
+            SELECT OSPath,
+                   get(item=Data, field="mft") as Inode,
+                   Mode.String AS Mode, Size,
+                   Mtime AS MTime,
+                   Atime AS ATime,
+                   Btime AS BTime,
+                   Ctime AS CTime, "" AS Keywords,
+                   IsDir, Data
+            FROM glob(globs=Glob,
+                      accessor=Accessor)
+            WHERE NOT IsDir AND Size > 0 AND Size < FileSize_Limit
+          }
+        )
+
+      LET keyword_search = SELECT * FROM foreach(
+        row={
+           SELECT * FROM file_search
+           WHERE NOT IsDir
+        },
+        query={
+           SELECT OSPath, Inode, Mode,
+                  Size, MTime, ATime, CTime, BTime,
+                  str(str=String.Data) As Keywords, IsDir, Data,
+                  Rule as DetectionRule
+
+           FROM yara(files=OSPath,
+                     rules=YaraRule,
+                     accessor=Accessor)
+        })
+
+      SELECT 
+          OSPath, 
+          Inode, 
+          Mode, 
+          Size, 
+          MTime, 
+          ATime,
+          CTime, 
+          BTime, 
+          DetectionRule,
+          if(condition=Upload_File, then=upload(file=OSPath, accessor=Accessor)) AS Upload,
+          if(condition=Calculate_Hash, then=hash(path=OSPath, accessor=Accessor)) AS Hash,
+          Data
+      FROM keyword_search
+
+column_types:
+  - name: MTime
+    type: timestamp
+  - name: ATime
+    type: timestamp
+  - name: CTime
+    type: timestamp
+  - name: BTime
+    type: timestamp
+  - name: Upload
+    type: preview_upload
