@@ -2,6 +2,136 @@ import sys
 import os
 import pefile
 import re
+from pydantic import BaseModel
+
+class TLV(BaseModel):
+    p_type: int
+    parent: bool
+    data: bytes | None
+
+def searchAndParseMZ(bytes_content):
+    mz_index = bytes_content.find(b"MZ")
+
+    if mz_index == -1:
+        return False
+
+    mz_content = bytes_content[mz_index:]
+    
+    try:
+        pe = pefile.PE(data=mz_content)
+        pe_size = pe.OPTIONAL_HEADER.SizeOfImage
+
+        if hasattr(pe, 'DIRECTORY_ENTRY_DEBUG'):
+            for debug_entry in pe.DIRECTORY_ENTRY_DEBUG:
+                if hasattr(debug_entry, 'entry'):
+                    if hasattr(debug_entry.entry, 'PdbFileName'):
+                        print(f"[+] Found PDB filename in C#: {debug_entry.entry.PdbFileName.decode('utf-8', errors='replace')}")
+
+        if pe_size > len(mz_content):
+            return mz_content[:len(mz_content)]
+        else:
+            return mz_content[:pe_size]
+
+    except Exception as e:
+        return False
+
+
+    
+
+def decrypt_shellcode(bytes_content, filename, parsed_resource_dir):
+
+    # Try hardcoded 0x55 first
+    trial_keys = [0x55, range(0x55), range(0x56,0x100)]
+    
+    for trial_key in trial_keys:
+
+        decrypted_content = b""
+
+        for k,v in enumerate(bytes_content):
+            decrypted_content += (int(v) ^ 0x55).to_bytes(1)
+    
+
+        pe_file_content = searchAndParseMZ(decrypted_content)
+        if(pe_file_content):
+
+
+            out_file = os.path.join(parsed_resource_dir ,f"CSharp_{filename}_{hex(trial_key)}")
+            with open(out_file, 'wb') as fd:
+                fd.write(pe_file_content)
+
+
+            out_file = os.path.join(parsed_resource_dir, f"shellcode_{filename}_{hex(trial_key)}")
+            with open(out_file, 'wb') as fd:
+                fd.write(decrypted_content)
+            return
+       
+
+    
+
+
+def parse_tlv( res_content, tlv_array, offset=0,):
+
+
+
+    p_type = res_content[offset] &127
+    p_isParent = res_content[offset] & 128 > 0
+    offset += 1
+
+    data_len = int.from_bytes(res_content[offset:offset+4], byteorder="little", signed=False)
+    offset += 4
+    
+
+    if (p_isParent) :
+        
+        offset = parse_tlv(res_content, tlv_array, offset)
+        object_tlv = TLV(p_type=p_type, parent=p_isParent, data=None)
+        
+    else :
+        data = res_content[offset:offset+data_len]
+        offset += data_len
+        object_tlv =  TLV(p_type=p_type, parent=p_isParent, data=data)
+        
+
+
+    tlv_array.append(object_tlv)
+
+    
+    if (offset< len(res_content)):
+        offset = parse_tlv(res_content, tlv_array, offset)
+
+    
+    return offset
+
+def parse_c2_config(bytes_content, filename, parsed_resource_dir):
+    # TODO Further parse this blob into tlv format -> based on the C# binary HostConf
+    with open(os.path.join(parsed_resource_dir, f"config_{filename}"), 'wb') as fd:
+        fd.write(bytes_content)
+
+
+
+
+def parse_resource(filename, decrypted_resource_blob, parsed_resource_dir):
+    global GLOBAL_RES_PARSER
+
+    try:
+        tlv_array = []
+        parse_tlv(decrypted_resource_blob, tlv_array)
+
+        for node in tlv_array:
+            # print(f"Parent: {node.parent}, type: {node.p_type}")
+            # Type 3 is shellcode
+            # Type 5 is config
+            if (node.p_type == 3):
+                decrypt_shellcode(node.data, filename, parsed_resource_dir)
+
+            if (node.p_type == 5):
+                parse_c2_config(node.data, filename, parsed_resource_dir)
+    except Exception as e:
+        print(f"Error parsing shellcode/c#/config for {filename}")
+        print(e)
+
+    GLOBAL_RES_PARSER += 1
+
 
 def extract_resource(exe_path, resource_id, resource_type_str):
     try:
@@ -147,10 +277,12 @@ def process_file(exe_path, resource_id, resource_type, output_dir=None):
             encrypted_dir = os.path.join(output_dir, "encrypted_res")
             decrypted_dir = os.path.join(output_dir, "decrypted_res")
             iocs_dir = os.path.join(output_dir, "IoCs")
+            parsed_resource_dir = os.path.join(output_dir, "parsed_shellcode")
             
             os.makedirs(encrypted_dir, exist_ok=True)
             os.makedirs(decrypted_dir, exist_ok=True)
             os.makedirs(iocs_dir, exist_ok=True)
+            os.makedirs(parsed_resource_dir, exist_ok=True)
             
             # Set filenames with proper paths
             filename_base = os.path.basename(exe_path)
@@ -165,10 +297,12 @@ def process_file(exe_path, resource_id, resource_type, output_dir=None):
             encrypted_dir = os.path.join(base_dir, "encrypted_res")
             decrypted_dir = os.path.join(base_dir, "decrypted_res")
             iocs_dir = os.path.join(base_dir, "IoCs")
+            parsed_resource_dir = os.path.join(base_dir, "parsed_shellcode")
             
             os.makedirs(encrypted_dir, exist_ok=True)
             os.makedirs(decrypted_dir, exist_ok=True)
             os.makedirs(iocs_dir, exist_ok=True)
+            os.makedirs(parsed_resource_dir, exist_ok=True)
             
             # Set filenames with proper paths
             filename_base = os.path.basename(exe_path)
@@ -254,6 +388,13 @@ def process_file(exe_path, resource_id, resource_type, output_dir=None):
             print("The file was extracted but could not be properly decrypted or analyzed.")
             return False
         
+        
+        # Parse resources here
+        filename = os.path.basename(exe_path)
+
+        
+        parse_resource(filename, decrypted_data, parsed_resource_dir)
+
         return True
     
     except Exception as e:
