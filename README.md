@@ -27,3 +27,6 @@ python tunoi_config_extractor.py --dir <directory_path> [--output <output_direct
   ├── decrypted_res/  # Decrypted configuration data
   └── IoCs/    
 ```
+
+### Future Developments 
+- Extend the capability to Linux elf binaries.
