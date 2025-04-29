@@ -25,8 +25,11 @@ python tunoi_config_extractor.py --dir <directory_path> [--output <output_direct
 <output_directory>/
   ├── encrypted_res/  # Original encrypted resources
   ├── decrypted_res/  # Decrypted configuration data
+  ├── parsed_shellcode/  # Parsed shellcode/C#/config data
   └── IoCs/    
+  
 ```
 
 ### Future Developments 
 - Extend the capability to Linux elf binaries.
+- Further parse the config in accordance to HostConf found in the communication module in the C# binary
